@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import json
 import aiohttp
 
 # Configuración
@@ -14,47 +15,63 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-async def get_join_requests(session):
-    url = f"{BASE_URL}/getChatJoinRequests"
-    params = {"chat_id": CHANNEL_ID, "limit": 100}
-    async with session.get(url, params=params) as resp:
+async def api_call(session, method, params=None):
+    url = f"{BASE_URL}/{method}"
+    async with session.post(url, json=params or {}) as resp:
         text = await resp.text()
-        import json
-        data = json.loads(text)
-        if data.get("ok"):
-            return data.get("result", [])
-        else:
-            logger.error(f"Error obteniendo solicitudes: {data}")
-            return []
-
-async def approve_request(session, user_id):
-    url = f"{BASE_URL}/approveChatJoinRequest"
-    params = {"chat_id": CHANNEL_ID, "user_id": user_id}
-    async with session.post(url, params=params) as resp:
-        import json
-        text = await resp.text()
-        data = json.loads(text)
-        return data.get("ok", False)
+        try:
+            return json.loads(text)
+        except:
+            logger.error(f"No se pudo parsear respuesta: {text[:200]}")
+            return {"ok": False}
 
 async def auto_aprobar():
     logger.info("✅ Bot iniciado. Comprobando solicitudes cada 60 segundos...")
     async with aiohttp.ClientSession() as session:
+
+        # Verificar que el bot tiene acceso al canal
+        me = await api_call(session, "getMe")
+        if me.get("ok"):
+            logger.info(f"Bot conectado: @{me['result']['username']}")
+        else:
+            logger.error(f"❌ Token inválido: {me}")
+            return
+
+        chat = await api_call(session, "getChat", {"chat_id": CHANNEL_ID})
+        if chat.get("ok"):
+            logger.info(f"Canal encontrado: {chat['result'].get('title', 'Sin título')}")
+        else:
+            logger.error(f"❌ No se puede acceder al canal: {chat}")
+            return
+
         while True:
             try:
-                requests = await get_join_requests(session)
-                if requests:
-                    for req in requests:
-                        user = req.get("from", {})
-                        user_id = user.get("id")
-                        name = user.get("first_name", "Desconocido")
-                        if user_id:
-                            ok = await approve_request(session, user_id)
-                            if ok:
-                                logger.info(f"✅ Aprobado: {name} (ID: {user_id})")
-                            else:
-                                logger.warning(f"⚠️ No se pudo aprobar: {name}")
+                result = await api_call(session, "getChatJoinRequests", {
+                    "chat_id": CHANNEL_ID,
+                    "limit": 100
+                })
+
+                if result.get("ok"):
+                    requests = result.get("result", [])
+                    if requests:
+                        for req in requests:
+                            user = req.get("from", {})
+                            user_id = user.get("id")
+                            name = user.get("first_name", "Desconocido")
+                            if user_id:
+                                approve = await api_call(session, "approveChatJoinRequest", {
+                                    "chat_id": CHANNEL_ID,
+                                    "user_id": user_id
+                                })
+                                if approve.get("ok"):
+                                    logger.info(f"✅ Aprobado: {name} (ID: {user_id})")
+                                else:
+                                    logger.warning(f"⚠️ Error aprobando {name}: {approve}")
+                    else:
+                        logger.info("Sin solicitudes pendientes.")
                 else:
-                    logger.info("Sin solicitudes pendientes.")
+                    logger.error(f"❌ Error API: {result}")
+
             except Exception as e:
                 logger.error(f"❌ Error inesperado: {e}")
 
